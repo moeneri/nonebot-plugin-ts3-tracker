@@ -1,0 +1,333 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+import nonebot
+from nonebot import logger
+from nonebot.adapters.onebot.v11 import Bot
+
+from .config import Ts3TrackerSettings
+from .models import Ts3OnlineUser, Ts3ServerStatus
+from .query import Ts3QueryError
+from .service import Ts3TrackerService
+from .storage import SnapshotStore, TrackedClientSnapshot
+
+MessageSender = Callable[[str, str, str], Awaitable[bool]]
+NowFactory = Callable[[], datetime]
+
+
+@dataclass(slots=True)
+class NotificationDiff:
+    joined: list[TrackedClientSnapshot]
+    left: list[TrackedClientSnapshot]
+
+
+class Ts3TrackerRuntime:
+    def __init__(
+        self,
+        settings: Ts3TrackerSettings,
+        service: Ts3TrackerService,
+        *,
+        store: SnapshotStore | None = None,
+        message_sender: MessageSender | None = None,
+        now_factory: NowFactory | None = None,
+    ) -> None:
+        self.settings = settings
+        self.service = service
+        self._store = store or SnapshotStore(self._build_data_dir() / "snapshot.json")
+        self._message_sender = message_sender or self._send_message
+        self._now_factory = now_factory or datetime.now
+        self._snapshot: dict[str, TrackedClientSnapshot] = {}
+        self._snapshot_lock = asyncio.Lock()
+        self._stop_event = asyncio.Event()
+        self._poll_task: asyncio.Task[None] | None = None
+        self.service._duration_provider = self.get_online_duration_seconds
+
+    async def startup(self) -> None:
+        self._stop_event.clear()
+        try:
+            self._snapshot = self._store.load()
+        except Exception as exc:
+            logger.error("failed to load ts3 snapshot store: {}", exc)
+            self._snapshot = {}
+
+        if not self.settings.notification_enabled:
+            logger.info("TS3 通知轮询已关闭。")
+            return
+
+        logger.info(
+            "TS3 通知轮询已启动，轮询间隔 {} 秒，通知群：{}，通知私聊：{}，群白名单模式：{}。",
+            self.settings.poll_interval_seconds,
+            ",".join(self.settings.get_effective_notify_groups()) or "-",
+            self.settings.notify_target_users or "-",
+            "开启" if self.settings.group_whitelist_enabled else "关闭",
+        )
+        await self.sync_once(notify=not self.settings.startup_silent)
+        self._ensure_poll_task()
+
+    async def shutdown(self) -> None:
+        self._stop_event.set()
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+            self._poll_task = None
+
+    async def sync_once(self, *, notify: bool) -> NotificationDiff:
+        missing_fields = self.service.get_missing_required_fields()
+        if missing_fields:
+            logger.warning(
+                "TS3 通知轮询跳过，配置不完整：{}",
+                "、".join(missing_fields),
+            )
+            return NotificationDiff(joined=[], left=[])
+
+        try:
+            status = await self.service.fetch_status()
+        except Ts3QueryError as exc:
+            logger.warning("TS3 轮询失败：{}", exc)
+            return NotificationDiff(joined=[], left=[])
+        except Exception as exc:  # pragma: no cover
+            logger.exception("TS3 轮询发生未预期错误：{}", exc)
+            return NotificationDiff(joined=[], left=[])
+
+        current = self._build_snapshot(status)
+        async with self._snapshot_lock:
+            diff = self._calculate_diff(self._snapshot, current)
+            self._snapshot = current
+            try:
+                self._store.save(self._snapshot)
+            except Exception as exc:
+                logger.error("保存 TS3 快照失败：{}", exc)
+
+        if notify:
+            await self._dispatch_notifications(status, diff)
+        elif diff.joined or diff.left:
+            logger.info(
+                "TS3 首次同步完成，不发送通知。进入：{}，离开：{}。",
+                "、".join(item.nickname for item in diff.joined) or "无",
+                "、".join(item.nickname for item in diff.left) or "无",
+            )
+
+        return diff
+
+    def _ensure_poll_task(self) -> None:
+        if self._poll_task is not None and not self._poll_task.done():
+            return
+        self._poll_task = asyncio.create_task(self._poll_loop())
+
+    async def _poll_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await self.sync_once(notify=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover
+                logger.error("TS3 轮询循环异常：{}", exc)
+
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=self.settings.poll_interval_seconds,
+                )
+            except asyncio.TimeoutError:
+                continue
+
+    def _build_snapshot(
+        self, status: Ts3ServerStatus
+    ) -> dict[str, TrackedClientSnapshot]:
+        snapshots: dict[str, TrackedClientSnapshot] = {}
+        now_text = self._format_now()
+        for user in status.users:
+            key = self._user_key(user)
+            previous = self._snapshot.get(key)
+            snapshots[key] = TrackedClientSnapshot(
+                nickname=user.nickname,
+                unique_id=user.unique_id,
+                channel_id=user.channel_id,
+                channel_name=user.channel_name,
+                connected_duration_seconds=user.connected_duration_seconds,
+                away=user.away,
+                first_seen_at=(
+                    previous.first_seen_at if previous and previous.first_seen_at else now_text
+                ),
+            )
+        return snapshots
+
+    def _calculate_diff(
+        self,
+        previous: dict[str, TrackedClientSnapshot],
+        current: dict[str, TrackedClientSnapshot],
+    ) -> NotificationDiff:
+        joined = [current[key] for key in current.keys() - previous.keys()]
+        left = [previous[key] for key in previous.keys() - current.keys()]
+        joined.sort(key=lambda item: item.nickname.casefold())
+        left.sort(key=lambda item: item.nickname.casefold())
+        return NotificationDiff(joined=joined, left=left)
+
+    async def _dispatch_notifications(
+        self, status: Ts3ServerStatus, diff: NotificationDiff
+    ) -> None:
+        messages: list[str] = []
+        if diff.joined:
+            logger.info(
+                "{} 进入了服务器。",
+                "、".join(item.nickname for item in diff.joined),
+            )
+            messages.append(self._format_join_message(status, diff.joined))
+        if diff.left:
+            logger.info(
+                "{} 退出了服务器。",
+                "、".join(item.nickname for item in diff.left),
+            )
+            messages.append(self._format_leave_message(status, diff.left))
+        if not messages:
+            return
+
+        targets = [
+            ("group", target)
+            for target in self.settings.get_effective_notify_groups()
+        ]
+        targets.extend(
+            ("private", target)
+            for target in self.settings.parse_targets(self.settings.notify_target_users)
+        )
+        if not targets:
+            logger.warning("检测到 TS3 变化，但没有可用的通知目标。")
+            return
+
+        for message in messages:
+            for target_type, target in targets:
+                ok = await self._message_sender(target_type, target, message)
+                if not ok:
+                    logger.warning(
+                        "发送 TS3 通知失败，目标类型：{}，目标：{}。",
+                        target_type,
+                        target,
+                    )
+
+    def _format_join_message(
+        self, status: Ts3ServerStatus, snapshots: list[TrackedClientSnapshot]
+    ) -> str:
+        lines = [
+            "让我看看是谁还没上号 👀",
+        ]
+        for snapshot in snapshots:
+            lines.append(f"🧾 昵称：{snapshot.nickname}")
+            lines.append(f"🟢 上线时间：{snapshot.first_seen_at or self._format_now()}")
+            lines.append(f"📣 {snapshot.nickname} 进入了 TS 服务器")
+        lines.append(f"👥 当前在线人数：{status.online_count}")
+        lines.append(f"📜 在线列表：{self._format_online_list(status)}")
+        return "\n".join(lines)
+
+    def _format_leave_message(
+        self, status: Ts3ServerStatus, snapshots: list[TrackedClientSnapshot]
+    ) -> str:
+        lines = [
+            "📤 用户下线通知",
+        ]
+        for snapshot in snapshots:
+            duration_text = self._format_online_duration(snapshot)
+            lines.append(f"🧾 昵称：{snapshot.nickname}")
+            lines.append(f"🟢 上线时间：{snapshot.first_seen_at or self._format_now()}")
+            lines.append(f"🔴 下线时间：{self._format_now()}")
+            lines.append(f"⏱️ 在线时长：{duration_text}")
+        lines.append(f"👥 当前在线人数：{status.online_count}")
+        lines.append(f"📜 在线列表：{self._format_online_list(status)}")
+        return "\n".join(lines)
+
+    async def _send_message(self, target_type: str, target: str, message: str) -> bool:
+        bot = self._select_bot()
+        if bot is None:
+            logger.warning("没有可用的 OneBot V11 机器人，无法发送 TS3 主动通知。")
+            return False
+
+        try:
+            normalized_target = int(target) if target.isdigit() else target
+            if target_type == "group":
+                await bot.send_group_msg(group_id=normalized_target, message=message)
+            else:
+                await bot.send_private_msg(user_id=normalized_target, message=message)
+            return True
+        except Exception as exc:
+            logger.error("发送 TS3 主动{}消息失败：{}", target_type, exc)
+            return False
+
+    def _select_bot(self) -> Bot | None:
+        bots = nonebot.get_bots()
+        if self.settings.notify_bot_id:
+            bot = bots.get(self.settings.notify_bot_id)
+            if isinstance(bot, Bot):
+                return bot
+        for bot in bots.values():
+            if isinstance(bot, Bot):
+                return bot
+        return None
+
+    def _build_data_dir(self) -> Path:
+        if self.settings.data_dir:
+            return Path(self.settings.data_dir)
+        return Path.cwd() / "data" / "ts3_tracker"
+
+    def _user_key(self, user: Ts3OnlineUser) -> str:
+        if user.unique_id:
+            return f"uid:{user.unique_id}"
+        if user.database_id:
+            return f"db:{user.database_id}"
+        if user.client_id:
+            return f"clid:{user.client_id}"
+        return f"name:{user.nickname}"
+
+    def _format_now(self) -> str:
+        return self._now_factory().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _format_duration(self, seconds: int) -> str:
+        total = max(0, seconds)
+        hours, remainder = divmod(total, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours}小时{minutes}分{secs}秒"
+        if minutes:
+            return f"{minutes}分{secs}秒"
+        return f"{secs}秒"
+
+    def _format_online_duration(self, snapshot: TrackedClientSnapshot) -> str:
+        if snapshot.first_seen_at:
+            try:
+                started_at = datetime.strptime(snapshot.first_seen_at, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                started_at = None
+            else:
+                seconds = int((self._now_factory() - started_at).total_seconds())
+                return self._format_duration(seconds)
+        return self._format_duration(snapshot.connected_duration_seconds)
+
+    def _format_online_list(self, status: Ts3ServerStatus) -> str:
+        if not status.users:
+            return "暂无在线用户"
+        return ", ".join(user.nickname for user in status.users)
+
+    def get_online_duration_seconds(self, user: Ts3OnlineUser) -> int | None:
+        key = self._user_key(user)
+        snapshot = self._snapshot.get(key)
+        if snapshot is not None:
+            if snapshot.first_seen_at:
+                try:
+                    started_at = datetime.strptime(
+                        snapshot.first_seen_at, "%Y-%m-%d %H:%M:%S"
+                    )
+                except ValueError:
+                    pass
+                else:
+                    return max(0, int((self._now_factory() - started_at).total_seconds()))
+            if snapshot.connected_duration_seconds > 0:
+                return snapshot.connected_duration_seconds
+        if user.connected_duration_seconds > 0:
+            return user.connected_duration_seconds
+        return None

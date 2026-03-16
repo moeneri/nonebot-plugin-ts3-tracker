@@ -1,0 +1,46 @@
+[project]
+name = "nonebot-plugin-ts3-tracker"
+version = "1.0.0"
+description = "TeamSpeak 3 query and join/leave notification plugin for NoneBot2"
+authors = [{ name = "neri" }]
+readme = "README.md"
+license = "MIT"
+keywords = ["nonebot", "nonebot2", "ts3", "teamspeak3", "serverquery", "onebot"]
+requires-python = ">=3.10, <4.0"
+dependencies = [
+  "nonebot2 >=2.4.4, <3.0.0",
+  "nonebot-adapter-onebot >=2.4.0, <3.0.0",
+  "pydantic >=2.0.0, <3.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/moeneri/nonebot_plugin_ts3_tracker"
+Repository = "https://github.com/moeneri/nonebot_plugin_ts3_tracker"
+
+[dependency-groups]
+test = [
+  "nonebug >=0.4.1, <0.5.0",
+  "pytest >=8.0.0, <9.0.0",
+  "pytest-asyncio >=0.24.0, <1.0.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.format]
+line-ending = "lf"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+ignore = ["B008", "E501", "RUF001"]
+
+[tool.uv.build-backend]
+module-root = ""
+
+[build-system]
+requires = ["uv_build >=0.8.3, <0.10.0"]
+build-backend = "uv_build"

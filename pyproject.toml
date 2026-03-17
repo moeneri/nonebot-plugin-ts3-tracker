@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-ts3-tracker"
-version = "1.0.2"
+version = "1.0.3"
 description = "TeamSpeak 3 query and join/leave notification plugin for NoneBot2"
 authors = [{ name = "neri" }]
 readme = "README.md"
@@ -39,9 +39,9 @@ line-ending = "lf"
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 ignore = ["B008", "E501", "RUF001"]
 
-[tool.uv.build-backend]
-module-root = ""
+[tool.setuptools]
+packages = ["nonebot_plugin_ts3_tracker", "onebot_plugin_ts3_tracker"]
 
 [build-system]
-requires = ["uv_build >=0.8.3, <0.10.0"]
-build-backend = "uv_build"
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"

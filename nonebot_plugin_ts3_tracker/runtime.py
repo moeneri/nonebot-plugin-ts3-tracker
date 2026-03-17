@@ -276,7 +276,7 @@ class Ts3TrackerRuntime:
     def _build_snapshot_file(self) -> Path:
         if self.settings.data_dir:
             return Path(self.settings.data_dir) / "snapshot.json"
-        return store.get_plugin_data_file("snapshot.json")
+        return store.get_data_file("nonebot_plugin_ts3_tracker", "snapshot.json")
 
     def _user_key(self, user: Ts3OnlineUser) -> str:
         if user.unique_id:

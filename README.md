@@ -22,9 +22,11 @@
 
 ## 安装
 
-1. 将目录放入 NoneBot2 项目，或作为本地包安装
-2. 在机器人项目中加载插件 `nonebot_plugin_ts3_tracker`
-3. 配置环境变量
+1. 安装插件：
+   `nb plugin install nonebot-plugin-ts3-tracker`
+2. 确保已安装本插件依赖的 `nonebot-plugin-localstore`
+3. 在机器人项目中加载插件 `nonebot_plugin_ts3_tracker`
+4. 配置环境变量
 
 ## 基础配置
 
@@ -85,7 +87,7 @@ TS3_TRACKER__DATA_DIR=data/ts3_tracker
 - `TS3_TRACKER__GROUP_WHITELIST_GROUPS`：允许使用群命令查询，且允许接收群通知的白名单群号
 - `TS3_TRACKER__POLL_INTERVAL_SECONDS`：轮询间隔，默认 `5`
 - `TS3_TRACKER__STARTUP_SILENT`：启动时只同步快照，不立刻发送历史在线通知
-- `TS3_TRACKER__DATA_DIR`：快照持久化目录
+- `TS3_TRACKER__DATA_DIR`：自定义快照持久化目录；不填写时使用 `nonebot-plugin-localstore` 的插件数据目录
 
 ## 群白名单模式
 
@@ -174,10 +176,14 @@ neri 退出了服务器。
 
 插件当前不是通过数据库持久化。
 
-它使用本地 JSON 快照文件记录在线状态，默认保存在：
+它使用本地 JSON 快照文件记录在线状态。
+
+默认情况下，文件通过 `nonebot-plugin-localstore` 保存到插件专属数据目录。
+
+如果你手动设置了 `TS3_TRACKER__DATA_DIR`，则会改为保存到你指定目录下的：
 
 ```text
-data/ts3_tracker/snapshot.json
+<TS3_TRACKER__DATA_DIR>/snapshot.json
 ```
 
 快照中主要保存：

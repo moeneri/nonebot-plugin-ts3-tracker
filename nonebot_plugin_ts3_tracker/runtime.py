@@ -7,8 +7,11 @@ from datetime import datetime
 from pathlib import Path
 
 import nonebot
-from nonebot import logger
+from nonebot import logger, require
 from nonebot.adapters.onebot.v11 import Bot
+
+require("nonebot_plugin_localstore")
+import nonebot_plugin_localstore as store
 
 from .config import Ts3TrackerSettings
 from .models import Ts3OnlineUser, Ts3ServerStatus
@@ -32,13 +35,13 @@ class Ts3TrackerRuntime:
         settings: Ts3TrackerSettings,
         service: Ts3TrackerService,
         *,
-        store: SnapshotStore | None = None,
+        store_backend: SnapshotStore | None = None,
         message_sender: MessageSender | None = None,
         now_factory: NowFactory | None = None,
     ) -> None:
         self.settings = settings
         self.service = service
-        self._store = store or SnapshotStore(self._build_data_dir() / "snapshot.json")
+        self._store = store_backend or SnapshotStore(self._build_snapshot_file())
         self._message_sender = message_sender or self._send_message
         self._now_factory = now_factory or datetime.now
         self._snapshot: dict[str, TrackedClientSnapshot] = {}
@@ -270,10 +273,10 @@ class Ts3TrackerRuntime:
                 return bot
         return None
 
-    def _build_data_dir(self) -> Path:
+    def _build_snapshot_file(self) -> Path:
         if self.settings.data_dir:
-            return Path(self.settings.data_dir)
-        return Path.cwd() / "data" / "ts3_tracker"
+            return Path(self.settings.data_dir) / "snapshot.json"
+        return store.get_plugin_data_file("snapshot.json")
 
     def _user_key(self, user: Ts3OnlineUser) -> str:
         if user.unique_id:

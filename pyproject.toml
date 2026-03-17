@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-ts3-tracker"
-version = "1.0.0"
+version = "1.0.1"
 description = "TeamSpeak 3 query and join/leave notification plugin for NoneBot2"
 authors = [{ name = "neri" }]
 readme = "README.md"

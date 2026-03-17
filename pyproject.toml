@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/moeneri/astrbot-plugin_ts3-tracker"
-Repository = "https://github.com/moeneri/astrbot-plugin_ts3-tracker"
+Homepage = "https://github.com/moeneri/nonebot-plugin-ts3-tracker"
+Repository = "https://github.com/moeneri/nonebot-plugin-ts3-tracker"
 
 [dependency-groups]
 test = [

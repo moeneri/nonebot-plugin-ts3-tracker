@@ -24,7 +24,7 @@ __plugin_meta__ = PluginMetadata(
         "可选：开启轮询后发送 TS3 进服/退服通知"
     ),
     type="application",
-    homepage="https://github.com/moeneri/astrbot-plugin_ts3-tracker",
+    homepage="https://github.com/moeneri/nonebot-plugin-ts3-tracker",
     config=Config,
     supported_adapters={"nonebot.adapters.onebot.v11"},
 )

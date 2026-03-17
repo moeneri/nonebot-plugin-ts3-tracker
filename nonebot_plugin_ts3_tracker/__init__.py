@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import re
-
-from nonebot import get_driver, get_plugin_config, logger, on_command, on_regex
+from nonebot import get_driver, get_plugin_config, logger, on_command
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent
 from nonebot.plugin import PluginMetadata
 
@@ -44,12 +42,6 @@ ts3_status = on_command(
     priority=plugin_config.command_priority,
     block=True,
 )
-ts3_status_regex = on_regex(
-    r"^(?:/)?(?:上号|ts|tsinfo)$",
-    flags=re.IGNORECASE,
-    priority=plugin_config.command_priority,
-    block=True,
-)
 
 
 @ts3_status.handle()
@@ -65,21 +57,6 @@ async def handle_ts3_status(event: MessageEvent) -> None:
     )
     message = await service.build_server_message()
     await ts3_status.finish(message)
-
-
-@ts3_status_regex.handle()
-async def handle_ts3_status_regex(event: MessageEvent) -> None:
-    denied_message = _ensure_group_allowed(event)
-    if denied_message is not None:
-        await ts3_status_regex.finish(denied_message)
-
-    group_id = getattr(event, "group_id", None)
-    logger.info(
-        "群号 {} 查询了服务器信息。",
-        group_id if group_id is not None else event.get_session_id(),
-    )
-    message = await service.build_server_message()
-    await ts3_status_regex.finish(message)
 
 
 driver = get_driver()

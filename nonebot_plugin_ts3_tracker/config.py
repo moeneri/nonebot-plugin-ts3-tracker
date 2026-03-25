@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from nonebot.compat import BaseModel, field_validator
 
 
 class Ts3TrackerSettings(BaseModel):
@@ -10,12 +10,11 @@ class Ts3TrackerSettings(BaseModel):
     serverquery_username: str = ""
     serverquery_password: str = ""
     debug: bool = False
-    command_priority: int = 10
+    command_prefix_required: bool = True
     query_timeout_seconds: float = 10.0
     notification_enabled: bool = False
     notify_target_groups: str = ""
     notify_target_users: str = ""
-    notify_bot_id: str = ""
     group_whitelist_enabled: bool = False
     group_whitelist_groups: str = ""
     poll_interval_seconds: int = 5
@@ -28,7 +27,6 @@ class Ts3TrackerSettings(BaseModel):
         "serverquery_password",
         "notify_target_groups",
         "notify_target_users",
-        "notify_bot_id",
         "group_whitelist_groups",
         "data_dir",
         mode="before",
@@ -37,7 +35,7 @@ class Ts3TrackerSettings(BaseModel):
     def strip_text(cls, value: object) -> str:
         return str(value).strip()
 
-    @field_validator("command_priority", "poll_interval_seconds")
+    @field_validator("poll_interval_seconds")
     @classmethod
     def validate_positive_int(cls, value: int) -> int:
         return max(1, value)
@@ -58,12 +56,18 @@ class Ts3TrackerSettings(BaseModel):
         return str(group_id) in set(self.parse_targets(self.group_whitelist_groups))
 
     def get_effective_notify_groups(self) -> list[str]:
-        notify_groups = self.parse_targets(self.notify_target_groups)
+        notify_groups = self.get_notify_groups()
+        return self.filter_groups_by_whitelist(notify_groups)
+
+    def get_notify_groups(self) -> list[str]:
+        return self.parse_targets(self.notify_target_groups)
+
+    def filter_groups_by_whitelist(self, group_ids: list[str]) -> list[str]:
         if not self.group_whitelist_enabled:
-            return notify_groups
+            return group_ids
         whitelist = set(self.parse_targets(self.group_whitelist_groups))
-        return [group_id for group_id in notify_groups if group_id in whitelist]
+        return [group_id for group_id in group_ids if group_id in whitelist]
 
 
 class Config(BaseModel):
-    ts3_tracker: Ts3TrackerSettings = Field(default_factory=Ts3TrackerSettings)
+    ts3_tracker: Ts3TrackerSettings = Ts3TrackerSettings()

@@ -45,3 +45,33 @@ class SnapshotStore:
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+
+
+class GroupNotifyStore:
+    def __init__(self, data_file: Path) -> None:
+        self._data_file = data_file
+
+    def load(self) -> dict[str, bool]:
+        if not self._data_file.exists():
+            return {}
+
+        raw = json.loads(self._data_file.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("group notify file root node must be an object")
+
+        groups: dict[str, bool] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str) or not isinstance(value, bool):
+                continue
+            groups[key] = value
+        return groups
+
+    def save(self, groups: dict[str, bool]) -> None:
+        self._data_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            key: value for key, value in sorted(groups.items(), key=lambda item: item[0])
+        }
+        self._data_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )

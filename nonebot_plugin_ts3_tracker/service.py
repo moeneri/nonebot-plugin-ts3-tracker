@@ -26,6 +26,15 @@ class Ts3TrackerService:
         self._duration_provider = duration_provider
 
     async def build_server_message(self) -> str:
+        return await self.build_detail_message()
+
+    async def build_basic_message(self) -> str:
+        return await self._build_message(detailed=False)
+
+    async def build_detail_message(self) -> str:
+        return await self._build_message(detailed=True)
+
+    async def _build_message(self, *, detailed: bool) -> str:
         missing_fields = self.get_missing_required_fields()
         if missing_fields:
             return "TS3 配置不完整，请先填写：" + "、".join(missing_fields)
@@ -39,7 +48,7 @@ class Ts3TrackerService:
             logger.exception("Unexpected TS3 query error: {}", exc)
             return "TS3 查询失败：发生了未预期错误，请查看 NoneBot 日志。"
 
-        return self.format_server_status(status)
+        return self.format_server_status(status, detailed=detailed)
 
     async def fetch_status(self) -> Ts3ServerStatus:
         return await self._build_client().fetch_status()
@@ -56,29 +65,47 @@ class Ts3TrackerService:
             missing.append("ServerQuery 密码")
         return missing
 
-    def format_server_status(self, status: Ts3ServerStatus) -> str:
-        lines = [
-            f"服务器地址：{status.server_host}:{status.server_port}",
-            f"服务器端口：{status.server_port}",
-            f"服务器名称：{status.server_name or '-'}",
-            "服务器频道：",
-        ]
+    def format_server_status(
+        self, status: Ts3ServerStatus, *, detailed: bool = True
+    ) -> str:
+        lines: list[str] = []
+        if detailed:
+            lines.extend(
+                [
+                    f"服务器地址：{status.server_host}:{status.server_port}",
+                    f"服务器端口：{status.server_port}",
+                    f"服务器名称：{status.server_name or '-'}",
+                    "服务器频道：",
+                ]
+            )
 
-        for channel_name, users in self.group_users_by_channel(status):
+        for channel_name, users in self.group_users_by_channel(
+            status,
+            show_duration=detailed,
+            include_empty_channels=detailed,
+        ):
             display_name = channel_name or "未命名频道"
             if users:
                 lines.append(f"{display_name}: {', '.join(users)}")
             else:
                 lines.append(display_name)
 
+        if not lines and not detailed:
+            return "暂无在线用户"
+
         return "\n".join(lines)
 
     def group_users_by_channel(
-        self, status: Ts3ServerStatus
+        self,
+        status: Ts3ServerStatus,
+        *,
+        show_duration: bool,
+        include_empty_channels: bool,
     ) -> list[tuple[str, list[str]]]:
         grouped: dict[str, dict[str, object]] = {}
-        for channel_id, channel_name in status.channels:
-            grouped.setdefault(channel_id, {"name": channel_name, "users": []})
+        if include_empty_channels:
+            for channel_id, channel_name in status.channels:
+                grouped.setdefault(channel_id, {"name": channel_name, "users": []})
 
         for user in status.users:
             channel_id = user.channel_id or "__unknown__"
@@ -88,18 +115,22 @@ class Ts3TrackerService:
             )
             users = channel_entry["users"]
             assert isinstance(users, list)
-            users.append(self._format_user_display(user))
+            users.append(self._format_user_display(user, show_duration=show_duration))
 
         ordered_groups: list[tuple[str, list[str]]] = []
         for channel_id, _ in status.channels:
             channel_entry = grouped.pop(channel_id, None)
             if channel_entry is None:
                 continue
+            if not include_empty_channels and not channel_entry["users"]:
+                continue
             ordered_groups.append(
                 (str(channel_entry["name"]), list(channel_entry["users"]))
             )
 
         for channel_entry in grouped.values():
+            if not include_empty_channels and not channel_entry["users"]:
+                continue
             ordered_groups.append(
                 (str(channel_entry["name"]), list(channel_entry["users"]))
             )
@@ -119,7 +150,11 @@ class Ts3TrackerService:
             timeout=self.settings.query_timeout_seconds,
         )
 
-    def _format_user_display(self, user: Ts3OnlineUser) -> str:
+    def _format_user_display(
+        self, user: Ts3OnlineUser, *, show_duration: bool
+    ) -> str:
+        if not show_duration:
+            return user.nickname
         duration = self._get_user_duration_seconds(user)
         if duration is None:
             return user.nickname

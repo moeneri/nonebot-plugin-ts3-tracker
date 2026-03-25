@@ -17,7 +17,7 @@ from .config import Ts3TrackerSettings
 from .models import Ts3OnlineUser, Ts3ServerStatus
 from .query import Ts3QueryError
 from .service import Ts3TrackerService
-from .storage import SnapshotStore, TrackedClientSnapshot
+from .storage import GroupNotifyStore, SnapshotStore, TrackedClientSnapshot
 
 MessageSender = Callable[[str, str, str], Awaitable[bool]]
 NowFactory = Callable[[], datetime]
@@ -42,10 +42,13 @@ class Ts3TrackerRuntime:
         self.settings = settings
         self.service = service
         self._store = store_backend or SnapshotStore(self._build_snapshot_file())
+        self._group_store = GroupNotifyStore(self._build_group_notify_file())
         self._message_sender = message_sender or self._send_message
         self._now_factory = now_factory or datetime.now
         self._snapshot: dict[str, TrackedClientSnapshot] = {}
+        self._group_notify_overrides: dict[str, bool] = {}
         self._snapshot_lock = asyncio.Lock()
+        self._group_notify_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
         self._poll_task: asyncio.Task[None] | None = None
         self.service._duration_provider = self.get_online_duration_seconds
@@ -58,6 +61,12 @@ class Ts3TrackerRuntime:
             logger.error("failed to load ts3 snapshot store: {}", exc)
             self._snapshot = {}
 
+        try:
+            self._group_notify_overrides = self._group_store.load()
+        except Exception as exc:
+            logger.error("failed to load ts3 group notify store: {}", exc)
+            self._group_notify_overrides = {}
+
         if not self.settings.notification_enabled:
             logger.info("TS3 通知轮询已关闭。")
             return
@@ -65,7 +74,7 @@ class Ts3TrackerRuntime:
         logger.info(
             "TS3 通知轮询已启动，轮询间隔 {} 秒，通知群：{}，通知私聊：{}，群白名单模式：{}。",
             self.settings.poll_interval_seconds,
-            ",".join(self.settings.get_effective_notify_groups()) or "-",
+            ",".join(self.get_effective_notify_groups()) or "-",
             self.settings.notify_target_users or "-",
             "开启" if self.settings.group_whitelist_enabled else "关闭",
         )
@@ -195,7 +204,7 @@ class Ts3TrackerRuntime:
 
         targets = [
             ("group", target)
-            for target in self.settings.get_effective_notify_groups()
+            for target in self.get_effective_notify_groups()
         ]
         targets.extend(
             ("private", target)
@@ -218,10 +227,11 @@ class Ts3TrackerRuntime:
     def _format_join_message(
         self, status: Ts3ServerStatus, snapshots: list[TrackedClientSnapshot]
     ) -> str:
-        lines = [
-            "让我看看是谁还没上号 👀",
-        ]
-        for snapshot in snapshots:
+        lines: list[str] = []
+        for index, snapshot in enumerate(snapshots):
+            if index:
+                lines.append("")
+            lines.append(f"🔔用户 {snapshot.nickname} 已进入服务器")
             lines.append(f"🧾 昵称：{snapshot.nickname}")
             lines.append(f"🟢 上线时间：{snapshot.first_seen_at or self._format_now()}")
             lines.append(f"📣 {snapshot.nickname} 进入了 TS 服务器")
@@ -264,10 +274,6 @@ class Ts3TrackerRuntime:
 
     def _select_bot(self) -> Bot | None:
         bots = nonebot.get_bots()
-        if self.settings.notify_bot_id:
-            bot = bots.get(self.settings.notify_bot_id)
-            if isinstance(bot, Bot):
-                return bot
         for bot in bots.values():
             if isinstance(bot, Bot):
                 return bot
@@ -276,7 +282,43 @@ class Ts3TrackerRuntime:
     def _build_snapshot_file(self) -> Path:
         if self.settings.data_dir:
             return Path(self.settings.data_dir) / "snapshot.json"
-        return store.get_data_file("nonebot_plugin_ts3_tracker", "snapshot.json")
+        return store.get_plugin_data_file("snapshot.json")
+
+    def _build_group_notify_file(self) -> Path:
+        if self.settings.data_dir:
+            return Path(self.settings.data_dir) / "group_notify.json"
+        return store.get_plugin_data_file("group_notify.json")
+
+    def get_effective_notify_groups(self) -> list[str]:
+        configured_groups = self.settings.get_notify_groups()
+        disabled_groups = {
+            group_id
+            for group_id, enabled in self._group_notify_overrides.items()
+            if not enabled
+        }
+        ordered_groups: list[str] = []
+        for group_id in configured_groups:
+            if group_id in disabled_groups or group_id in ordered_groups:
+                continue
+            ordered_groups.append(group_id)
+        for group_id, enabled in self._group_notify_overrides.items():
+            if not enabled or group_id in ordered_groups:
+                continue
+            ordered_groups.append(group_id)
+        return self.settings.filter_groups_by_whitelist(ordered_groups)
+
+    def is_group_notify_enabled(self, group_id: str | int) -> bool:
+        return str(group_id) in set(self.get_effective_notify_groups())
+
+    async def set_group_notify_enabled(
+        self, group_id: str | int, enabled: bool
+    ) -> bool:
+        normalized_group_id = str(group_id)
+        async with self._group_notify_lock:
+            current = self._group_notify_overrides.get(normalized_group_id)
+            self._group_notify_overrides[normalized_group_id] = enabled
+            self._group_store.save(self._group_notify_overrides)
+        return current != enabled
 
     def _user_key(self, user: Ts3OnlineUser) -> str:
         if user.unique_id:
